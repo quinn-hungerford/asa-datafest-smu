@@ -1,4 +1,5 @@
-# ASA DataFest at SMU 2024 -- Digital Textbook Cheating Detection & Engagement Analysis  
+# ASA DataFest at SMU 2024 #
+# Digital Textbook Cheating Detection & Engagement Analysis #
 
 ## Project Overview
 This project was developed for **ASA DataFest 2024 at Southern Methodist University (SMU)**, where our team **GraphOutLoud** represented **The University of Texas at Austin**.  
