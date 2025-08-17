@@ -34,7 +34,7 @@ BOOK <- "College / Statistics and Data Science (ABC)"
 ```
 
 ```{r}
-# Engagement by chapter
+# Calculate per chapter engagement
 pages <- read.csv("page_views.csv")
 
 pages_college <- pages %>% dplyr::filter(book == BOOK)
