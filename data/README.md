@@ -10,7 +10,7 @@ Instead, this README provides a description of the data files and their purpose 
 ## Provided Datasets
 
 - **items.csv**  
-  Metadata about textbook items (questions, videos, activities, and more).  
+  Metadata about textbook items (questions, videos, activities, etc.).  
   *Example columns*: `item_id`, `item_type`, `chapter`, `page`, `lrn_type`.
 
 - **media_views.csv**  
