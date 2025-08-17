@@ -1,0 +1,903 @@
+---
+title: "DataFest"
+author: "Quinn Hungerford"
+date: "2024-04-13"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(tidy = TRUE, tidy.opts = list(width.cutoff = 80))
+
+# Import all libraries
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(ggthemes)
+library(knitr)
+library(kableExtra)
+library(scales)
+library(readr)
+library(janitor)
+library(glue)
+library(broom)
+library(lubridate)
+library(ranger)
+library(pROC)
+library(yardstick)
+```
+
+# Part 1: Identifying Question Types to Improve Student Interest, Engagement, and Performance
+
+```{r}
+# Book selection for Part 1
+BOOK <- "College / Statistics and Data Science (ABC)"
+```
+
+```{r}
+# Engagement by chapter
+pages <- read.csv("page_views.csv")
+
+pages_college <- pages %>% dplyr::filter(book == BOOK)
+eng_col <- "engaged"
+
+eng_by_chapter <- pages_college %>%
+  dplyr::filter(!is.na(chapter_number), !is.na(.data[[eng_col]])) %>%
+  dplyr::group_by(chapter_number) %>%
+  dplyr::summarise(mean_msec = mean(.data[[eng_col]], na.rm = TRUE), .groups = "drop") %>%
+  dplyr::arrange(chapter_number)
+
+ggplot(eng_by_chapter, aes(x = chapter_number, y = mean_msec)) +
+  geom_point(size = 2) +
+  geom_point(data = dplyr::filter(eng_by_chapter, chapter_number %in% c(13,4,7)),
+             aes(color = factor(chapter_number)),
+             shape = 21, size = 5, stroke = 1.3, fill = NA) +
+  scale_color_manual(values = c(`7` = "red", `13` = "blue", `4` = "#FFD700"),
+                     guide = "none") +
+  scale_x_continuous(breaks = sort(unique(eng_by_chapter$chapter_number))) +
+  scale_y_continuous(labels = comma, limits = c(100000, 450000)) +
+  labs(title = "Mean Engagement (msec) per Chapter",
+       x = "Chapter Number", y = "Mean Engagement (msec)") +
+  theme_minimal()
+```
+
+```{r}
+# Student interest by chapter (tries checkpoints_pulse first then responses)
+get_interest_df <- function() {
+  if (file.exists("checkpoints_pulse.csv")) {
+    df <- read.csv("checkpoints_pulse.csv")
+    if ("book" %in% names(df)) df <- dplyr::filter(df, book == BOOK)
+
+    chap_candidates <- c("chapter_number","chapter","ch_num")
+    int_candidates  <- c("interest","Interest","interest_rating","rating","response","value")
+
+    chap_col <- chap_candidates[chap_candidates %in% names(df)][1]
+    int_col  <- int_candidates[int_candidates %in% names(df)][1]
+
+    if (!is.na(chap_col) && !is.na(int_col)) {
+      return(df %>% dplyr::select(chapter_number = dplyr::all_of(chap_col),
+                                  interest = dplyr::all_of(int_col)))
+    }
+  }
+  resp <- read.csv("responses.csv") %>% dplyr::filter(book == BOOK)
+  if ("construct" %in% names(resp)) {
+    cand <- resp %>% dplyr::filter(tolower(construct) %in% c("interest","student interest"))
+    int_candidates <- c("response","interest","rating","value")
+    int_col <- int_candidates[int_candidates %in% names(cand)][1]
+    if (!is.na(int_col)) {
+      return(cand %>% dplyr::select(chapter_number, interest = dplyr::all_of(int_col)))
+    }
+  }
+  stop("No interest data in either dataset")
+}
+
+interest_raw <- get_interest_df()
+
+interest_by_chapter <- interest_raw %>%
+  dplyr::mutate(interest = suppressWarnings(as.numeric(interest))) %>%
+  dplyr::filter(!is.na(chapter_number), !is.na(interest)) %>%
+  dplyr::group_by(chapter_number) %>%
+  dplyr::summarise(mean_interest = mean(interest, na.rm = TRUE), .groups = "drop") %>%
+  dplyr::arrange(chapter_number)
+
+ggplot(interest_by_chapter, aes(x = chapter_number, y = mean_interest)) +
+  geom_point(size = 2) +
+  geom_point(data = dplyr::filter(interest_by_chapter, chapter_number %in% c(13,4,7)),
+             aes(color = factor(chapter_number)),
+             shape = 21, size = 5, stroke = 1.3, fill = NA) +
+  scale_color_manual(values = c(`7` = "red", `13` = "blue", `4` = "#FFD700"),
+                     guide = "none") +
+  scale_x_continuous(breaks = sort(unique(interest_by_chapter$chapter_number))) +
+  scale_y_continuous(limits = c(3.95, 4.25)) +
+  labs(title = "Student Interest by Chapter",
+       x = "Textbook Chapter", y = "Interest Rating") +
+  theme_minimal()
+```
+
+```{r}
+# Top 3 chapters by proportion for MCQ and for Plaintext
+responses <- read.csv("responses.csv")
+
+by_chapter_type <- responses %>%
+  dplyr::filter(book == BOOK) %>%
+  dplyr::select(chapter_number, lrn_type) %>%
+  dplyr::filter(!is.na(chapter_number), !is.na(lrn_type))
+
+chapter_totals <- by_chapter_type %>%
+  dplyr::count(chapter_number, name = "n_total")
+
+top3_prop <- function(qtype) {
+  by_chapter_type %>%
+    dplyr::filter(lrn_type == qtype) %>%
+    dplyr::count(chapter_number, name = "n_type") %>%
+    dplyr::inner_join(chapter_totals, by = "chapter_number") %>%
+    dplyr::mutate(prop = n_type / n_total) %>%
+    dplyr::arrange(dplyr::desc(prop)) %>%
+    dplyr::slice_head(n = 3) %>%
+    dplyr::mutate(Question_Type = qtype) %>%
+    dplyr::select(Chapter = chapter_number,
+                  Question_Type,
+                  `Proportion of Questions` = prop)
+}
+
+top3_mcq <- top3_prop("mcq")
+top3_plaintext <- top3_prop("plaintext")
+
+kable(top3_mcq, digits = 3, booktabs = TRUE,
+      caption = "Top 3 Chapters with Highest Proportion of MCQ") %>%
+  kable_styling(full_width = FALSE, latex_options = c("striped","hold_position"))
+
+kable(top3_plaintext, digits = 3, booktabs = TRUE,
+      caption = "Top 3 Chapters with Highest Proportion of Plaintext") %>%
+  kable_styling(full_width = FALSE, latex_options = c("striped","hold_position"))
+```
+
+```{r}
+# Prep some helper chapter data
+pages <- read.csv("page_views.csv")
+pages <- pages[pages$book == "High School / Advanced Statistics and Data Science I (ABC)", ]
+
+chapter_data <- data.frame(
+  Chapter = c(1, 2, 3, 4, 5, 6, 7, 8, 9),
+  Section_Count = c(7, 11, 11, 16, 12, 14, 11, 7, 10)
+)
+
+merged_pages <- merge(pages, chapter_data, by.x = "chapter_number", by.y = "Chapter", all.x = TRUE)
+```
+
+```{r}
+# Mean points by question type (merge + CI table + plot)
+items <- read.csv("items.csv")
+items <- items[!is.na(items$lrn_question_reference), ]
+
+responses <- read.csv("responses.csv")
+responses <- responses[!is.na(responses$lrn_question_reference), ]
+
+mergeddd <- merge(items, responses, by = "lrn_question_reference", suffixes = c(".item", ".resp"))
+lrn_type_col <- if ("lrn_type.resp" %in% names(mergeddd)) "lrn_type.resp" else "lrn_type"
+
+group_mean <- aggregate(
+  x = mergeddd$points_earned,
+  by = list(mergeddd[[lrn_type_col]]),
+  FUN = function(z) mean(z, na.rm = TRUE)
+)
+
+names(group_mean)[names(group_mean) == 'Group.1'] <- 'Type_of_Question'
+names(group_mean)[names(group_mean) == 'x'] <- 'Mean_Points_Earned'
+
+kable(
+  group_mean,
+  align = c('l', 'c'),
+  col.names = c('Type of Question', 'Mean Points Earned'),
+  caption = 'Mean Points Earned by Question Type',
+  booktabs = TRUE,
+  digits = 2
+) %>%
+  kable_styling(full_width = FALSE, latex_options = c("striped", "hold_position"))
+```
+
+```{r}
+# 95% CI plot of means by question type
+type_col <- if ("lrn_type.resp" %in% names(mergeddd)) "lrn_type.resp" else "lrn_type.x"
+question_types <- unique(mergeddd[[type_col]])
+
+confidence_intervals <- data.frame(
+  Type_of_Question   = character(),
+  Mean_Points_Earned = numeric(),
+  Lower_CI           = numeric(),
+  Upper_CI           = numeric(),
+  stringsAsFactors   = FALSE
+)
+
+for (question_type in question_types) {
+  subset_data <- mergeddd[mergeddd[[type_col]] == question_type, , drop = FALSE]
+  x <- subset_data$points_earned
+  x <- x[!is.na(x)]
+  n <- length(x)
+
+  if (n > 1) {
+    mean_points   <- mean(x)
+    se            <- stats::sd(x) / sqrt(n)
+    t_value       <- stats::qt(0.975, df = n - 1)
+    lower_ci      <- mean_points - t_value * se
+    upper_ci      <- mean_points + t_value * se
+  } else if (n == 1) {
+    mean_points <- x
+    lower_ci <- NA_real_
+    upper_ci <- NA_real_
+  } else {
+    mean_points <- NA_real_
+    lower_ci <- NA_real_
+    upper_ci <- NA_real_
+  }
+
+  confidence_intervals <- rbind(
+    confidence_intervals,
+    data.frame(
+      Type_of_Question   = as.character(question_type),
+      Mean_Points_Earned = mean_points,
+      Lower_CI           = lower_ci,
+      Upper_CI           = upper_ci,
+      stringsAsFactors   = FALSE
+    )
+  )
+}
+
+confidence_intervals <- confidence_intervals[order(-confidence_intervals$Mean_Points_Earned), ]
+
+ggplot(confidence_intervals,
+       aes(x = Type_of_Question, y = Mean_Points_Earned)) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = Lower_CI, ymax = Upper_CI), width = 0.2) +
+  geom_hline(yintercept = mean(confidence_intervals$Mean_Points_Earned, na.rm = TRUE),
+             linetype = "dashed") +
+  labs(x = "Question Type", y = "Mean Points Earned",
+       title = "Mean Points Earned with 95% CIs by Question Type") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+# Welch t-tests comparing low-performing types and better ones (plaintext/mcq)
+type_col <- if ("lrn_type.resp" %in% names(mergeddd)) "lrn_type.resp" else "lrn_type.x"
+
+question_types_to_compare <- c("choicematrix", "imageclozeassociation", "shorttext", "sortlist")
+better_question_types <- c("plaintext", "mcq")
+
+t_test_results <- data.frame(
+  Type_of_Question = character(),
+  Better_Question_Type = character(),
+  p_value = numeric(),
+  stringsAsFactors = FALSE
+)
+
+for (better_question_type in better_question_types) {
+  for (question_type in question_types_to_compare) {
+    subset_data1 <- mergeddd[mergeddd[[type_col]] == question_type, "points_earned", drop = TRUE]
+    subset_data2 <- mergeddd[mergeddd[[type_col]] == better_question_type, "points_earned", drop = TRUE]
+
+    subset_data1 <- subset_data1[!is.na(subset_data1)]
+    subset_data2 <- subset_data2[!is.na(subset_data2)]
+
+    if (length(subset_data1) >= 2 && length(subset_data2) >= 2) {
+      t_test_result <- t.test(subset_data1, subset_data2)
+      p_value <- t_test_result$p.value
+    } else {
+      p_value <- NA_real_
+    }
+
+    t_test_results <- rbind(
+      t_test_results,
+      data.frame(
+        Type_of_Question = question_type,
+        Better_Question_Type = better_question_type,
+        p_value = p_value
+      )
+    )
+  }
+}
+
+t_test_results$p_value_fmt <- format.pval(t_test_results$p_value, digits = 3, eps = 1e-300)
+
+knitr::kable(
+  t_test_results[, c("Type_of_Question", "Better_Question_Type", "p_value_fmt")],
+  col.names = c("Type_of_Question", "Better_Question_Type", "p_value"),
+  booktabs = TRUE
+) %>%
+  kableExtra::kable_styling(full_width = FALSE, latex_options = c("striped","hold_position"))
+```
+
+# Part 2: Targeted Revision of Underperforming Chapters
+
+```{r}
+# Load data and clean for Part 2 with the HS book this time
+BOOK <- "High School / Advanced Statistics and Data Science I (ABC)"
+
+responses <- read_csv("responses.csv")        |> clean_names()
+page_views <- read_csv("page_views.csv")       |> clean_names()
+checkpoints_eoc <- read_csv("checkpoints_eoc.csv")  |> clean_names()
+checkpoints_pulse <- read_csv("checkpoints_pulse.csv")|> clean_names()
+
+all_chapters <- tibble(chapter_number = 1:9)
+```
+
+```{r}
+# Average proportion correct by chapter, plot and table
+acc_by_chapter <- responses |>
+  filter(book == BOOK, points_possible > 0) |>
+  mutate(is_correct = points_earned / points_possible) |>
+  group_by(student_id, chapter_number) |>
+  summarise(prop_correct = mean(is_correct, na.rm = TRUE), .groups = "drop") |>
+  group_by(chapter_number) |>
+  summarise(Average_Proportion_of_Correct_Attempts = mean(prop_correct, na.rm = TRUE),
+            .groups = "drop") |>
+  right_join(all_chapters, by = "chapter_number") |>
+  arrange(chapter_number)
+
+p_acc <- ggplot(
+  acc_by_chapter,
+  aes(chapter_number, Average_Proportion_of_Correct_Attempts)
+) +
+  geom_line(color = "black") +
+  geom_point(size = 2, color = "black") +
+  geom_point(
+    data = acc_by_chapter |> filter(chapter_number == 4),
+    aes(chapter_number, Average_Proportion_of_Correct_Attempts),
+    shape = 21, size = 4.5, stroke = 1.2, fill = NA, color = "red"
+  ) +
+  scale_x_continuous(breaks = 1:9) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  labs(
+    title = "High School Students' Average Proportion of Correct Attempts by Chapter",
+    x = "Chapter",
+    y = "Average Proportion of Correct Attempts"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 10, face = "plain", margin = margin(b = 6)),
+    axis.title = element_text(size = 10, face = "plain"),
+    axis.text  = element_text(size = 9),
+    plot.margin = margin(10, 20, 10, 20)
+  )
+print(p_acc)
+
+kable(
+  acc_by_chapter,
+  digits = 3,
+  align = c("r", "r"),
+  col.names = c("Chapter", "Average Proportion of Correct Attempts")
+) |>
+  kable_styling(full_width = FALSE) |>
+  row_spec(which(acc_by_chapter$chapter_number == 4), bold = TRUE)
+```
+
+```{r}
+# Engagement by chapter, plot and table
+eng_by_chapter <- page_views |>
+  filter(book == BOOK) |>
+  group_by(chapter_number) |>
+  summarise(Students_Engaged = mean(engaged, na.rm = TRUE), .groups = "drop") |>
+  right_join(all_chapters, by = "chapter_number") |>
+  arrange(chapter_number)
+
+p_eng <- ggplot(eng_by_chapter, aes(chapter_number, Students_Engaged)) +
+  geom_line(color = "black") +
+  geom_point(size = 2, color = "black") +
+  geom_point(
+    data = eng_by_chapter |> filter(chapter_number %in% c(4, 5)),
+    aes(chapter_number, Students_Engaged),
+    shape = 21, size = 4.5, stroke = 1.2, fill = NA, color = "red"
+  ) +
+  scale_x_continuous(breaks = 1:9) +
+  labs(
+    title = "High School Students' Engagement by Chapter",
+    x = "Chapter",
+    y = "Average Students' Engagement (msec)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 10, face = "plain", margin = margin(b = 6)),
+    axis.title = element_text(size = 10, face = "plain"),
+    axis.text  = element_text(size = 9),
+    plot.margin = margin(10, 20, 10, 20)
+  )
+print(p_eng)
+
+kable(
+  eng_by_chapter |>
+    mutate(Students_Engaged = comma(Students_Engaged)),
+  align = c("r", "r"),
+  col.names = c("Chapter", "Average Students' Engagement (msec)")
+) |>
+  kable_styling(full_width = FALSE) |>
+  row_spec(which(eng_by_chapter$chapter_number %in% c(4, 5)), bold = TRUE)
+```
+
+```{r}
+# Number of sections vs total off-page time (with r, p, R² and a plot)
+chapter_summary <- page_views %>%
+  dplyr::group_by(chapter_number) %>%
+  dplyr::summarise(
+    Section_Count        = dplyr::n_distinct(section_number),
+    Total_Time_Off_Page  = sum(off_page_brief + off_page_long, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  tidyr::drop_na()
+
+cor_test  <- cor.test(chapter_summary$Section_Count,
+                      chapter_summary$Total_Time_Off_Page)
+lm_model  <- lm(Total_Time_Off_Page ~ Section_Count, data = chapter_summary)
+lm_sum    <- summary(lm_model)
+
+annot_txt <- sprintf("r = %.3f\np = %.4f\nR² = %.3f",
+                     unname(cor_test$estimate), cor_test$p.value, lm_sum$r.squared)
+
+ggplot(chapter_summary, aes(Section_Count, Total_Time_Off_Page)) +
+  geom_point(size = 2, color = "black") +
+  geom_smooth(method = "lm", se = TRUE, color = "red", fill = "grey70", alpha = 0.35) +
+  annotate(
+    "text",
+    x = min(chapter_summary$Section_Count),
+    y = max(chapter_summary$Total_Time_Off_Page),
+    label = annot_txt, hjust = 0, vjust = 1, size = 3.5
+  ) +
+  labs(
+    title = "Relationship Between Number of Sections and Time Off Page",
+    x = "Number of Sections in Chapter",
+    y = "Total Time Off Page (msec)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 11),
+    axis.title = element_text(size = 10),
+    axis.text  = element_text(size = 9)
+  )
+```
+
+```{r}
+# Table of the number of sections and total off-page per chapter
+chapter_table <- chapter_summary %>%
+  dplyr::transmute(
+    Chapter = chapter_number,
+    `Section Count` = Section_Count,
+    `Total Time Off-Page (msec)` = scales::comma(Total_Time_Off_Page)
+  )
+
+pct_drop_45 <- with(
+  dplyr::arrange(dplyr::filter(chapter_summary, chapter_number %in% c(4, 5)), chapter_number),
+  (Total_Time_Off_Page[1] - Total_Time_Off_Page[2]) / Total_Time_Off_Page[1] * 100
+)
+
+kableExtra::kbl(chapter_table, align = c("r","r","r"), booktabs = TRUE) |>
+  kableExtra::kable_styling(full_width = FALSE) |>
+  kableExtra::row_spec(which(chapter_table$Chapter %in% c(4, 5)), bold = TRUE) |>
+  kableExtra::footnote(
+    general = sprintf("Percent drop from Chapter 4 to Chapter 5: %.1f%%", pct_drop_45),
+    general_title = ""
+  )
+```
+
+```{r}
+# Tables of question-type counts in Chapters 4 and 5
+resp_clean <- read.csv("responses.csv") %>%
+  janitor::clean_names() %>%
+  dplyr::filter(book == BOOK, !is.na(chapter_number), !is.na(lrn_type)) %>%
+  dplyr::mutate(Question_Type = lrn_type)
+
+ch4_kbl <- resp_clean %>%
+  dplyr::filter(chapter_number == 4) %>%
+  dplyr::count(Question_Type, name = "Count") %>%
+  dplyr::arrange(dplyr::desc(Count)) %>%
+  kableExtra::kbl(align = c("l","r"), col.names = c("Question_Type","Count"), caption = "Chapter 4") %>%
+  kableExtra::kable_styling(full_width = FALSE, bootstrap_options = "striped")
+
+ch5_kbl <- resp_clean %>%
+  dplyr::filter(chapter_number == 5) %>%
+  dplyr::count(Question_Type, name = "Count") %>%
+  dplyr::arrange(dplyr::desc(Count)) %>%
+  kableExtra::kbl(align = c("l","r"), col.names = c("Question_Type","Count"), caption = "Chapter 5") %>%
+  kableExtra::kable_styling(full_width = FALSE, bootstrap_options = "striped")
+
+ch4_kbl
+ch5_kbl
+```
+
+# Part 3: Detect Academic Dishonesty Using Feature Engineering & RandomForest Modeling
+
+```{r}
+# Load and clean CSV files
+checkpoints_eoc <- read_csv("checkpoints_eoc.csv", show_col_types = FALSE) %>% clean_names()
+checkpoints_pulse <- read_csv("checkpoints_pulse.csv", show_col_types = FALSE) %>% clean_names()
+media_views <- read_csv("media_views.csv", show_col_types = FALSE) %>% clean_names()
+page_views <- read_csv("page_views.csv", show_col_types = FALSE) %>% clean_names()
+responses <- read_csv("responses.csv", show_col_types = FALSE) %>% clean_names()
+items <- read_csv("items.csv", show_col_types = FALSE) %>% clean_names()
+
+# Creating helper functions
+has_cols <- function(df, cols) all(cols %in% names(df))
+nz_or0 <- function(x) { x[is.na(x)] <- 0; x }
+safe_ratio <- function(num, den, eps=1e-6) {
+  num <- nz_or0(num); den <- nz_or0(den); num/(den+eps)
+}
+zscore <- function(x) {
+  x <- ifelse(is.na(x), median(x, na.rm = TRUE), x)
+  sdx <- sd(x, na.rm = TRUE); if (is.na(sdx) || sdx == 0) return(rep(0, length(x)))
+  (x - mean(x, na.rm = TRUE))/sdx
+}
+invz <- function(x) -zscore(x)
+
+# Feature engineering for each student
+
+# Responses (correctness, attempts, timing) 
+if (!has_cols(responses, c("student_id","item_id"))) {
+  stop("Need student_id and item_id")
+}
+
+# Parse through response timestamps if they're there
+if ("lrn_dt_started" %in% names(responses)) {
+  responses <- responses %>%
+    mutate(lrn_dt_started = ymd_hms(lrn_dt_started, quiet = TRUE),
+           lrn_dt_started = if_else(is.na(lrn_dt_started),
+                                    ymd(lrn_dt_started, quiet = TRUE) %>% as_datetime(),
+                                    lrn_dt_started))
+}
+
+# Get the correctness from points
+responses <- responses %>%
+  mutate(is_correct = if (has_cols(responses, c("points_earned","points_possible")))
+           as.numeric(points_earned >= points_possible) else NA_real_)
+
+# Per (student, item)
+per_item <- responses %>%
+  arrange(student_id, item_id, attempt) %>%
+  group_by(student_id, item_id) %>%
+  summarise(
+    attempts = suppressWarnings(max(nz_or0(attempt), na.rm = TRUE)),
+    first_attempt_correct = ifelse(n() > 0, as.numeric(first(is_correct)), NA_real_),
+    ever_correct = suppressWarnings(max(nz_or0(is_correct), na.rm = TRUE)),
+    submissions = n(),
+    .groups = "drop"
+  )
+
+resp_student <- per_item %>%
+  group_by(student_id) %>%
+  summarise(
+    n_items = n(),
+    mean_attempts = mean(attempts, na.rm = TRUE),
+    max_attempts = max(attempts, na.rm = TRUE),
+    pct_items_first_try_correct = mean(first_attempt_correct, na.rm = TRUE),
+    pct_items_ever_correct = mean(ever_correct, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Get time-of-day features from responses
+time_agg <- responses %>%
+  filter(!is.na(lrn_dt_started)) %>%
+  mutate(hour = hour(lrn_dt_started),
+         weekday = wday(lrn_dt_started, week_start = 1) - 1) %>%
+  group_by(student_id) %>%
+  summarise(
+    frac_night = mean(hour < 5 | hour >= 23, na.rm = TRUE),
+    frac_weekend = mean(weekday >= 5, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Burstiness
+burst_agg <- responses %>%
+  filter(!is.na(lrn_dt_started)) %>%
+  arrange(student_id, lrn_dt_started) %>%
+  group_by(student_id) %>%
+  mutate(prev = lag(lrn_dt_started),
+         delta_sec = as.numeric(difftime(lrn_dt_started, prev, units = "secs"))) %>%
+  summarise(median_inter_start_sec = median(delta_sec, na.rm = TRUE), .groups = "drop")
+
+# Page views, looking at engagement
+if (!("student_id" %in% names(page_views))) stop("page_views need student_id")
+pv <- page_views %>%
+  mutate(across(any_of(c("engaged","idle_brief","idle_long","off_page_brief","off_page_long")), as.numeric))
+
+pv_agg <- pv %>%
+  group_by(student_id) %>%
+  summarise(
+    n_page_visits = n(),
+    unique_pages = n_distinct(page),
+    engaged_ms = sum(nz_or0(engaged), na.rm = TRUE),
+    idle_brief = sum(nz_or0(idle_brief), na.rm = TRUE),
+    idle_long  = sum(nz_or0(idle_long), na.rm = TRUE),
+    off_page_brief = sum(nz_or0(off_page_brief), na.rm = TRUE),
+    off_page_long  = sum(nz_or0(off_page_long), na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Media views
+if (!("student_id" %in% names(media_views))) stop("media_view need student_id")
+mv_agg <- media_views %>%
+  group_by(student_id) %>%
+  summarise(
+    n_media_events = n(),
+    unique_media_pages = n_distinct(page),
+    access_count = sum(nz_or0(access_count), na.rm = TRUE),
+    proportion_video = sum(nz_or0(proportion_video), na.rm = TRUE),
+    proportion_time = sum(nz_or0(proportion_time), na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# EOC and Pulse
+need_eoc <- c("student_id","chapter_number","n_possible","n_correct","n_attempt")
+if (!has_cols(checkpoints_eoc, need_eoc)) stop("checkpoints_eoc missing required columns")
+
+eoc_agg <- checkpoints_eoc %>%
+  group_by(student_id) %>%
+  summarise(
+    eoc_chapters = n_distinct(chapter_number),
+    eoc_total_possible = sum(nz_or0(n_possible), na.rm = TRUE),
+    eoc_total_correct  = sum(nz_or0(n_correct), na.rm = TRUE),
+    eoc_total_attempts = sum(nz_or0(n_attempt), na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(eoc_pct_correct = safe_ratio(eoc_total_correct, eoc_total_possible))
+
+need_pulse <- c("student_id","chapter_number","response")
+if (!has_cols(checkpoints_pulse, need_pulse)) stop("checkpoints_pulse doesn't have the needed columns")
+
+pulse_agg <- checkpoints_pulse %>%
+  group_by(student_id) %>%
+  summarise(
+    pulse_chapters = n_distinct(chapter_number),
+    pulse_responses = n(),
+    .groups = "drop"
+  )
+
+# Merge features together
+features <- resp_student %>%
+  full_join(time_agg, by = "student_id") %>%
+  full_join(burst_agg, by = "student_id") %>%
+  full_join(pv_agg, by = "student_id") %>%
+  full_join(mv_agg, by = "student_id") %>%
+  full_join(eoc_agg, by = "student_id") %>%
+  full_join(pulse_agg, by = "student_id") %>%
+  mutate(
+    views_per_item = safe_ratio(n_page_visits, n_items),
+    media_per_item = safe_ratio(n_media_events, n_items),
+    engaged_per_item_ms = safe_ratio(engaged_ms, n_items),
+    idle_ratio = safe_ratio(idle_brief + idle_long, engaged_ms)
+  )
+
+# Fill any NAs that are in numeric columns
+num_cols <- names(features)[sapply(features, is.numeric)]
+features[num_cols] <- lapply(features[num_cols], function(x){ x[is.na(x)] <- 0; x })
+
+# Create a proxy label with a suspicion score (top 10% flagged) so fewer attempts = higher suspicion, etc
+f <- features %>%
+  mutate(
+    z_acc = zscore(pct_items_ever_correct),
+    z_first_acc = zscore(pct_items_first_try_correct),
+    z_views = invz(views_per_item),
+    z_engaged = invz(engaged_per_item_ms),
+    z_attempts = invz(mean_attempts),
+    z_night      = zscore(frac_night)
+  ) %>%
+  mutate(
+    suspicion_score = 1.0*z_acc + 0.5*z_first_acc + 0.8*z_views + 0.8*z_engaged + 0.6*z_attempts + 0.2*z_night
+  )
+
+top_frac <- 0.10
+cutoff <- quantile(f$suspicion_score, probs = 1 - top_frac, na.rm = TRUE)
+f <- f %>% mutate(proxy_suspicious = as.integer(suspicion_score >= cutoff))
+cat("Check the fraction flagged:", mean(f$proxy_suspicious), "\n")
+
+# Random forest training/evaluation
+candidate_cols <- c(
+  "n_items","mean_attempts","max_attempts",
+  "pct_items_first_try_correct","pct_items_ever_correct",
+  "views_per_item","media_per_item","engaged_per_item_ms","idle_ratio",
+  "frac_night","frac_weekend","median_inter_start_sec",
+  "eoc_pct_correct","eoc_total_attempts","eoc_total_correct","eoc_total_possible",
+  "pulse_responses","pulse_chapters",
+  "n_page_visits","unique_pages","n_media_events","unique_media_pages"
+)
+X <- f %>% select(any_of(candidate_cols))
+y <- f$proxy_suspicious
+
+# Stratified split
+set.seed(42)
+idx_pos <- which(y == 1); idx_neg <- which(y == 0)
+test_frac <- 0.25
+test_pos <- sample(idx_pos, size = max(1, floor(length(idx_pos)*test_frac)))
+test_neg <- sample(idx_neg, size = max(1, floor(length(idx_neg)*test_frac)))
+test_idx <- c(test_pos, test_neg)
+train_idx <- setdiff(seq_len(nrow(X)), test_idx)
+
+train <- bind_cols(X[train_idx, , drop=FALSE], tibble(proxy_suspicious = factor(y[train_idx], levels=c(0,1))))
+test  <- bind_cols(X[test_idx, , drop=FALSE],  tibble(proxy_suspicious = factor(y[test_idx],  levels=c(0,1))))
+
+# Class weights
+w_pos <- sum(train$proxy_suspicious == "0") / max(1, sum(train$proxy_suspicious == "1"))
+cw <- setNames(c(1, w_pos), c("0","1"))
+
+rf <- ranger(
+  formula = proxy_suspicious ~ .,
+  data = train,
+  num.trees = 400,
+  mtry = floor(sqrt(ncol(X))),
+  min.node.size = 2,
+  importance = "impurity",
+  classification = TRUE,
+  probability = TRUE,
+  class.weights = cw,
+  seed = 42
+)
+
+# Evaluation of the model
+test_probs <- predict(rf, data = test)$predictions[, "1"]
+test_pred  <- ifelse(test_probs >= 0.5, "1", "0") %>% factor(levels=c("0","1"))
+
+cm <- yardstick::conf_mat(data.frame(truth=test$proxy_suspicious, estimate=test_pred), truth, estimate)
+auc <- pROC::roc(response = as.numeric(test$proxy_suspicious) - 1, predictor = test_probs)$auc
+prec <- yardstick::precision_vec(test$proxy_suspicious, test_pred, estimator="binary", event_level="second")
+rec <- yardstick::recall_vec(test$proxy_suspicious, test_pred, estimator="binary", event_level="second")
+f1 <- yardstick::f_meas_vec(test$proxy_suspicious, test_pred, estimator="binary", event_level="second")
+
+cat("\n Confusion Matrix \n")
+print(cm)
+cat(sprintf("ROC-AUC: %.3f\nPrecision: %.3f\nRecall: %.3f\nF1: %.3f\n", auc, prec, rec, f1))
+
+# Feature importances
+imp <- enframe(rf$variable.importance, name = "feature", value = "importance") %>%
+  arrange(desc(importance))
+print(head(imp, 15))
+
+# Score each student and show top 25
+all_probs <- predict(rf, data = X)$predictions[, "1"]
+triage <- f %>%
+  select(student_id, suspicion_score, proxy_suspicious,
+         pct_items_ever_correct, pct_items_first_try_correct,
+         views_per_item, engaged_per_item_ms, mean_attempts, frac_night, n_items) %>%
+  mutate(rf_proba = as.numeric(all_probs)) %>%
+  arrange(desc(rf_proba))
+print(triage %>% slice_head(n = 25))
+
+# Create a csv file of the flagged students for manual inspection by CourseKata
+readr::write_csv(triage, "triage_flagged_students.csv")
+```
+
+```{r}
+# Calculate feature importances
+feat_importance <- enframe(rf$variable.importance, name = "feature", value = "importance") %>%
+  arrange(desc(importance))
+
+# Normalize so that they sum to 1
+feat_importance <- feat_importance %>%
+  mutate(importance = importance / sum(importance))
+
+# Create display names of the features
+feature_labels <- c(
+  pct_items_first_try_correct = "First Try Correct (%)",
+  eoc_pct_correct = "End-of-Course Correct (%)",
+  views_per_item = "Views per Item",
+  pct_items_ever_correct = "Ever Correct (%)",
+  engaged_per_item_ms = "Engagement per Item (ms)",
+  n_page_visits = "Total Page Visits",
+  eoc_total_correct = "Total Correct (EoC)",
+  eoc_total_possible = "Total Possible (EoC)"
+)
+
+# Plot the top 8 important features
+feat_importance %>%
+  slice_max(importance, n = 8) %>%
+  ggplot(aes(x = reorder(feature, importance), y = importance)) +
+  geom_col(fill = "#7a8b99") +
+  coord_flip() +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  scale_x_discrete(labels = feature_labels) +
+  labs(
+    title = "Top Features Driving Suspicion",
+    x = NULL,
+    y = "Relative Importance"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.text.y = element_text(size = 9, color = "black"),
+    axis.text.x = element_text(size = 9, color = "black"),
+    axis.title.x = element_text(size = 10, face = "plain")
+  )
+```
+
+```{r}
+# Set an 80% decision threshold for determining potential cheaters
+threshold <- 0.80
+
+# Print out how many were flagged out of the total students
+flagged_n <- sum(triage$rf_proba >= threshold, na.rm = TRUE)
+total_n <- nrow(triage)
+flagged_pct <- flagged_n / total_n
+
+cat(sprintf(
+  "Flagged: %d of %d students (%.1f%%) at threshold %.2f\n",
+  flagged_n, total_n, 100*flagged_pct, threshold
+))
+```
+
+```{r}
+# Create a distribution of the suspicion probabilities for all students
+ggplot(triage, aes(x = rf_proba)) +
+  geom_histogram(
+    data = subset(triage, rf_proba <= 0.8),
+    bins = 30, fill = "pink", color = "white", alpha = 0.8
+  ) +
+  geom_histogram(
+    data = subset(triage, rf_proba > 0.8),
+    bins = 30, fill = "red", color = "white", alpha = 0.9
+  ) +
+  geom_vline(xintercept = 0.8, linetype = "dashed", color = "red", size = 1) +
+  labs(title = "Distribution of Suspicion Probabilities",
+       x = "Probability of Suspicious Pattern",
+       y = "Number of Students") +
+  theme_minimal(base_size = 12) + 
+  theme(
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    axis.title = element_text(size = 12),
+    axis.text  = element_text(size = 10),
+    panel.grid.minor = element_blank()
+  )
+```
+
+```{r}
+# Create an accuracy vs engagement scatterplot of all students
+ggplot(triage, aes(x = pct_items_ever_correct,
+                   y = engaged_per_item_ms)) +
+  geom_point(aes(color = rf_proba), alpha = 0.6, size = 2) +
+  scale_color_gradient(low = "pink", high = "red") +
+  geom_point(data = subset(triage, rf_proba >= 0.80),
+             aes(x = pct_items_ever_correct,
+                 y = engaged_per_item_ms),
+             color = "red", fill = "red", shape = 21,
+             size = 3.5, stroke = 1.1) +
+  labs(title = "Accuracy vs Engagement",
+       x = "% Items Ever Correct", y = "Engaged ms per Item",
+       color = "Suspicion\nProbability") +
+  theme_minimal()
+```
+
+```{r}
+# Create a table of all flagged students with more information about them
+top_tbl <- triage %>%
+  arrange(desc(rf_proba)) %>%
+  mutate(
+    flagged = rf_proba >= threshold,
+    student_id_display = str_trunc(student_id, width = 30, side = "right", ellipsis = "…")
+  ) %>%
+  slice_head(n = 10) %>%
+  transmute(
+    `Student ID` = student_id_display,
+    `Suspicion Prob.` = percent(rf_proba, accuracy = 0.1),
+    `% 1st-Try Correct` = percent(pct_items_first_try_correct, accuracy = 1),
+    `% Ever Correct` = percent(pct_items_ever_correct, accuracy = 1),
+    `Views/Item` = round(views_per_item, 3),
+    `Engaged ms/Item` = round(engaged_per_item_ms),
+    `Mean Attempts` = round(mean_attempts, 2),
+    flagged
+  )
+
+kb <- kable(
+  top_tbl %>% select(-flagged),
+  align = c("l","r","r","r","r","r","r"),
+  col.names = c("Student ID","Suspicion Prob.","% 1st-Try","% Ever",
+                "Views/Item","Engaged ms/Item","Mean Attempts"),
+  caption = NULL
+) %>%
+  kable_styling(
+    bootstrap_options = c("condensed","striped","hover"),
+    full_width = FALSE, font_size = 12
+  ) %>%
+  column_spec(1, width = "30em") %>%
+  column_spec(2:7, width = "8em")
+
+flag_idx <- which(triage %>% arrange(desc(rf_proba)) %>% 
+                    mutate(flagged = rf_proba >= threshold) %>% 
+                    slice_head(n = 10) %>% pull(flagged))
+
+kb <- kb %>%
+  row_spec(flag_idx, bold = TRUE, background = "#fde2e2")
+kb
+```
