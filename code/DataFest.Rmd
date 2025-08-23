@@ -1,6 +1,6 @@
 ---
 title: "DataFest"
-author: "Quinn Hungerford"
+author: "Quinn Hungerford, Kate Liu, Anya Ranavat, and Emma Zhou"
 date: "2024-04-13"
 output: pdf_document
 ---
